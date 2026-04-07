@@ -67,7 +67,7 @@ Supports all core MQTTv5.0 features: properties, reason codes, topic aliases, sh
 
 3. **Git clone**  
    ```bash
-   git clone https://github.com/yourusername/ESP32_MQTTv5.git
+   git clone https://github.com/JorgeGBeltre/ESP32_MQTTv5.git
    ```
    Then copy the folder to your Arduino `libraries` directory.
 

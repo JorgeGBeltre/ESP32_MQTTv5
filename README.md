@@ -1,5 +1,6 @@
 # ESP32_MQTTv5
 
+[![Arduino Library](https://img.shields.io/badge/Arduino-Library-teal)](https://www.arduinolibraries.info/libraries/esp32_mqt-tv5)
 [![Platform](https://img.shields.io/badge/platform-ESP32-blue)](https://www.espressif.com/en/products/socs/esp32)
 [![MQTT Version](https://img.shields.io/badge/MQTT-5.0-brightgreen)](https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)

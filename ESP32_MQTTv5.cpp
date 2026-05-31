@@ -704,7 +704,9 @@ int ESP32_MQTTv5::encodeLength(uint8_t *buf, uint32_t value) {
     value >>= 7;
     if (value > 0)
       byte |= 0x80;
-    buf[bytes++] = byte;
+    if (buf)
+      buf[bytes] = byte;
+    bytes++;
   } while (value > 0 && bytes < 4);
   return bytes;
 }

@@ -1,5 +1,6 @@
 #ifndef ESP32_MQTTV5_H
 #define ESP32_MQTTV5_H
+#define ESP32_MQTTV5_VERSION "1.0.4"
 
 #include <WiFi.h>
 #include <functional>
@@ -246,6 +247,7 @@ public:
 
   void setWill(const String &topic, const String &payload, uint8_t qos = 0,
                bool retain = false, MQTTProperties *props = nullptr);
+  bool hasWill() const { return _hasWill; }
 
   void setAutoReconnect(bool enable, uint32_t initialDelayMs = 1000,
                         uint32_t maxDelayMs = 30000);
@@ -303,6 +305,10 @@ public:
 
   MQTTReasonCode lastReasonCode() const { return _lastReasonCode; }
   String lastReasonString() const { return _lastReasonString; }
+  void setRawExclusiveTopic(const String &topic) { _rawExclusiveTopic = topic; }
+  const MQTTProperties &lastInboundProperties() const {
+    return _lastInboundProps;
+  }
 
 private:
   enum State : uint8_t {
@@ -339,6 +345,8 @@ private:
 
   std::function<void(const String &, const uint8_t *, size_t, uint8_t, bool)>
       _messageRawCallback;
+  String _rawExclusiveTopic;
+  MQTTProperties _lastInboundProps;
 
   uint16_t _topicAliasMaximum;
   uint16_t _serverTopicAliasMaximum;

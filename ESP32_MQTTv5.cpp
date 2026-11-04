@@ -1434,10 +1434,15 @@ bool ESP32_MQTTv5::parseIncoming() {
       }
 
       if (!isDup) {
+        _lastInboundProps = props;
         if (_messageRawCallback) {
           _messageRawCallback(topic, &_buffer[pos], (size_t)payloadLen, qos,
                               retain);
-        } else if (_messageCallback) {
+        }
+        const bool skipDecoded =
+            _messageRawCallback &&
+            (_rawExclusiveTopic.length() > 0 && topic == _rawExclusiveTopic);
+        if (_messageCallback && !skipDecoded) {
           MQTTMessage msg;
           msg.topic = topic;
           msg.payload = String((const char *)&_buffer[pos], payloadLen);

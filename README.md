@@ -393,6 +393,11 @@ The backend provides a scalable architecture for managing multiple devices simul
 
 ## Changelog
 
+### v1.0.4
+- Enabled clean coexistence between `onMessageRaw` and `onMessage` callbacks regardless of registration order, adding `setRawExclusiveTopic()` to avoid duplicate `String` payload allocations on dedicated binary topics (such as OTA streams).
+- Added `lastInboundProperties()` so raw message handlers can inspect MQTT 5.0 User Properties, `Subscription Identifier`, `Correlation Data`, and `Response Topic` on incoming `PUBLISH` frames.
+- Added `hasWill()` query helper and `ESP32_MQTTV5_VERSION` macro (`"1.0.4"`).
+
 ### v1.0.3
 - Fixed a `StoreProhibited` core panic in `encodeLength` when calculating length without a buffer during topic subscription.
 

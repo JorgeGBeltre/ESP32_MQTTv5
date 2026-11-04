@@ -518,6 +518,7 @@ ESP32_MQTTv5::ESP32_MQTTv5()
       _serverTopicAliasMaximum(0), _outAliasCount(0), _nextAliasId(1),
       _buffer(nullptr), _bufferSize(0),
       _desiredBufferSize(MQTT_DEFAULT_BUFFER_SIZE),
+      _txBuffer(nullptr), _txBufferSize(0),
       _allowDynamicBufferResize(true), _readTimeoutMs(2000), _qos2OutCount(0),
       _qos2InCount(0), _autoReconnect(false), _reconnectInitialDelay(1000),
       _reconnectMaxDelay(30000), _currentReconnectDelay(1000),
@@ -619,13 +620,25 @@ void ESP32_MQTTv5::setAutoReconnect(bool enable, uint32_t initDelay,
 }
 
 bool ESP32_MQTTv5::allocBuffer() {
-  if (_buffer && _bufferSize == _desiredBufferSize)
-    return true;
-  freeBuffer();
-  _buffer = (uint8_t *)malloc(_desiredBufferSize);
-  if (!_buffer)
-    return false;
-  _bufferSize = _desiredBufferSize;
+  if (!_buffer || _bufferSize != _desiredBufferSize) {
+    uint8_t *newBuf = (uint8_t *)malloc(_desiredBufferSize);
+    if (!newBuf)
+      return false;
+    if (_buffer)
+      free(_buffer);
+    _buffer = newBuf;
+    _bufferSize = _desiredBufferSize;
+  }
+  uint16_t desiredTx = _desiredBufferSize > 4096 ? 4096 : _desiredBufferSize;
+  if (!_txBuffer || _txBufferSize != desiredTx) {
+    uint8_t *newTx = (uint8_t *)malloc(desiredTx);
+    if (!newTx)
+      return false;
+    if (_txBuffer)
+      free(_txBuffer);
+    _txBuffer = newTx;
+    _txBufferSize = desiredTx;
+  }
   return true;
 }
 
@@ -634,6 +647,11 @@ void ESP32_MQTTv5::freeBuffer() {
     free(_buffer);
     _buffer = nullptr;
     _bufferSize = 0;
+  }
+  if (_txBuffer) {
+    free(_txBuffer);
+    _txBuffer = nullptr;
+    _txBufferSize = 0;
   }
 }
 
@@ -1034,12 +1052,16 @@ bool ESP32_MQTTv5::connect(const String &clientId, const String &username,
         _serverTopicAliasMaximum = props.getUint16(TOPIC_ALIAS_MAXIMUM, 0);
         _serverMaxPacketSize = props.getUint32(MAXIMUM_PACKET_SIZE, 0);
 
-        if (_serverMaxPacketSize > 0 && _serverMaxPacketSize > _bufferSize) {
-          uint16_t newSz =
-              (uint16_t)(_serverMaxPacketSize > 65535 ? 65535
-                                                      : _serverMaxPacketSize);
+        if (_allowDynamicBufferResize && _serverMaxPacketSize > 0 &&
+            _serverMaxPacketSize > _bufferSize &&
+            _bufferSize < MQTT_MAX_AUTO_BUFFER_SIZE) {
+          uint16_t newSz = (uint16_t)(_serverMaxPacketSize > MQTT_MAX_AUTO_BUFFER_SIZE
+                                          ? MQTT_MAX_AUTO_BUFFER_SIZE
+                                          : _serverMaxPacketSize);
+          uint16_t prevDesired = _desiredBufferSize;
           _desiredBufferSize = newSz;
           if (!allocBuffer()) {
+            _desiredBufferSize = prevDesired;
             notifyError(UNSPECIFIED_ERROR,
                         "Auto buffer resize failed after CONNACK");
           }
@@ -1561,8 +1583,13 @@ bool ESP32_MQTTv5::publish(const String &topic, const String &payload,
   if (qos > 2)
     qos = 2;
 
+  uint8_t *outBuf = _txBuffer ? _txBuffer : _buffer;
+  uint16_t outBufSize = _txBuffer ? _txBufferSize : _bufferSize;
+  if (!outBuf || outBufSize < 16)
+    return false;
+
   size_t estimatedMax = 5 + topic.length() + 2 + 256 + payload.length();
-  if (estimatedMax > _bufferSize) {
+  if (estimatedMax > outBufSize) {
     notifyError(PACKET_TOO_LARGE,
                 "Payload too large for buffer; call setBufferSize()");
     return false;
@@ -1609,8 +1636,8 @@ bool ESP32_MQTTv5::publish(const String &topic, const String &payload,
     return false;
   }
 
-  uint8_t *body = _buffer + 5;
-  int bodyMax = _bufferSize - 5;
+  uint8_t *body = outBuf + 5;
+  int bodyMax = outBufSize - 5;
   int bpos = 0;
 
 #define PB_NEED(n)                                                             \
@@ -1654,11 +1681,11 @@ bool ESP32_MQTTv5::publish(const String &topic, const String &payload,
 
 #undef PB_NEED
 
-  _buffer[0] = MQTT_PUBLISH | ((qos & 0x03) << 1) | (retain ? 0x01 : 0x00);
-  int encLen = encodeLength(&_buffer[1], (uint32_t)bpos);
+  outBuf[0] = MQTT_PUBLISH | ((qos & 0x03) << 1) | (retain ? 0x01 : 0x00);
+  int encLen = encodeLength(&outBuf[1], (uint32_t)bpos);
   int bodyOff = 1 + encLen;
   if (bodyOff != 5)
-    memmove(&_buffer[bodyOff], &_buffer[5], bpos);
+    memmove(&outBuf[bodyOff], &outBuf[5], bpos);
 
   if (bpos < 0) {
     notifyError(UNSPECIFIED_ERROR, "PUBLISH body length underflow");
@@ -1671,11 +1698,11 @@ bool ESP32_MQTTv5::publish(const String &topic, const String &payload,
     return false;
   }
 
-  if (sendPacket(_buffer, (int)totalLen) != (int)totalLen)
+  if (sendPacket(outBuf, (int)totalLen) != (int)totalLen)
     return false;
 
   if (qos == 2)
-    addQoS2Out(packetId, _buffer, (int)totalLen);
+    addQoS2Out(packetId, outBuf, (int)totalLen);
   return true;
 }
 
@@ -1691,11 +1718,13 @@ bool ESP32_MQTTv5::subscribe(const String &topic, uint8_t qos, bool noLocal,
                              uint32_t subId) {
   if (!connected())
     return false;
-  if ((size_t)topic.length() > _bufferSize - 20)
+  uint8_t *outBuf = _txBuffer ? _txBuffer : _buffer;
+  uint16_t outBufSize = _txBuffer ? _txBufferSize : _bufferSize;
+  if (!outBuf || outBufSize <= 20 || (size_t)topic.length() > outBufSize - 20)
     return false;
 
-  uint8_t *body = _buffer + 5;
-  int bodyMax = _bufferSize - 5;
+  uint8_t *body = outBuf + 5;
+  int bodyMax = outBufSize - 5;
   int bpos = 0;
 
   uint16_t packetId = getNextPacketId();
@@ -1735,23 +1764,25 @@ bool ESP32_MQTTv5::subscribe(const String &topic, uint8_t qos, bool noLocal,
   opts |= ((retainHandling & 0x03) << 4);
   body[bpos++] = opts;
 
-  _buffer[0] = MQTT_SUBSCRIBE;
-  int encLen = encodeLength(&_buffer[1], (uint32_t)bpos);
+  outBuf[0] = MQTT_SUBSCRIBE;
+  int encLen = encodeLength(&outBuf[1], (uint32_t)bpos);
   int bodyOff = 1 + encLen;
   if (bodyOff != 5)
-    memmove(&_buffer[bodyOff], &_buffer[5], bpos);
+    memmove(&outBuf[bodyOff], &outBuf[5], bpos);
   int totalLen = bodyOff + bpos;
-  return sendPacket(_buffer, totalLen) == totalLen;
+  return sendPacket(outBuf, totalLen) == totalLen;
 }
 
 bool ESP32_MQTTv5::unsubscribe(const String &topic) {
   if (!connected())
     return false;
-  if ((size_t)topic.length() > _bufferSize - 10)
+  uint8_t *outBuf = _txBuffer ? _txBuffer : _buffer;
+  uint16_t outBufSize = _txBuffer ? _txBufferSize : _bufferSize;
+  if (!outBuf || outBufSize <= 10 || (size_t)topic.length() > outBufSize - 10)
     return false;
 
-  uint8_t *body = _buffer + 5;
-  int bodyMax = _bufferSize - 5;
+  uint8_t *body = outBuf + 5;
+  int bodyMax = outBufSize - 5;
   int bpos = 0;
 
   uint16_t packetId = getNextPacketId();
@@ -1768,13 +1799,13 @@ bool ESP32_MQTTv5::unsubscribe(const String &topic) {
   memcpy(&body[bpos], topic.c_str(), tl);
   bpos += tl;
 
-  _buffer[0] = MQTT_UNSUBSCRIBE;
-  int encLen = encodeLength(&_buffer[1], (uint32_t)bpos);
+  outBuf[0] = MQTT_UNSUBSCRIBE;
+  int encLen = encodeLength(&outBuf[1], (uint32_t)bpos);
   int bodyOff = 1 + encLen;
   if (bodyOff != 5)
-    memmove(&_buffer[bodyOff], &_buffer[5], bpos);
+    memmove(&outBuf[bodyOff], &outBuf[5], bpos);
   int totalLen = bodyOff + bpos;
-  return sendPacket(_buffer, totalLen) == totalLen;
+  return sendPacket(outBuf, totalLen) == totalLen;
 }
 
 int ESP32_MQTTv5::buildAuth(uint8_t *buf, int bufSize, MQTTReasonCode reason,

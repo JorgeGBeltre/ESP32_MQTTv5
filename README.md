@@ -393,6 +393,10 @@ The backend provides a scalable architecture for managing multiple devices simul
 
 ## Changelog
 
+### v1.0.5
+- Added dedicated `_txBuffer` for `publish()`, `subscribe()`, and `unsubscribe()` so reentrant transmissions inside `onMessage` / `onConnect` callbacks never overwrite the inbound `_buffer`.
+- Hardened `allocBuffer()` to allocate replacement buffers before freeing existing ones and bounded `CONNACK` `MAXIMUM_PACKET_SIZE` auto-resizing with `MQTT_MAX_AUTO_BUFFER_SIZE` (`8192` bytes by default) to prevent ESP32 heap exhaustion.
+
 ### v1.0.4
 - Enabled clean coexistence between `onMessageRaw` and `onMessage` callbacks regardless of registration order, adding `setRawExclusiveTopic()` to avoid duplicate `String` payload allocations on dedicated binary topics (such as OTA streams).
 - Added `lastInboundProperties()` so raw message handlers can inspect MQTT 5.0 User Properties, `Subscription Identifier`, `Correlation Data`, and `Response Topic` on incoming `PUBLISH` frames.

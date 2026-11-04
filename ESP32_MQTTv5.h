@@ -1,6 +1,6 @@
 #ifndef ESP32_MQTTV5_H
 #define ESP32_MQTTV5_H
-#define ESP32_MQTTV5_VERSION "1.0.4"
+#define ESP32_MQTTV5_VERSION "1.0.5"
 
 #include <WiFi.h>
 #include <functional>
@@ -23,6 +23,10 @@
 
 #ifndef MQTT_DEFAULT_BUFFER_SIZE
 #define MQTT_DEFAULT_BUFFER_SIZE 512
+#endif
+
+#ifndef MQTT_MAX_AUTO_BUFFER_SIZE
+#define MQTT_MAX_AUTO_BUFFER_SIZE 8192
 #endif
 
 #ifndef MQTT_QOS2_RETRY_MS
@@ -363,6 +367,8 @@ private:
   uint8_t *_buffer;
   uint16_t _bufferSize;
   uint16_t _desiredBufferSize;
+  uint8_t *_txBuffer;
+  uint16_t _txBufferSize;
 
   bool _allowDynamicBufferResize;
 

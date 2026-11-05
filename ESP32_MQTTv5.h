@@ -1,6 +1,6 @@
 #ifndef ESP32_MQTTV5_H
 #define ESP32_MQTTV5_H
-#define ESP32_MQTTV5_VERSION "1.0.5"
+#define ESP32_MQTTV5_VERSION "1.0.6"
 
 #include <WiFi.h>
 #include <functional>

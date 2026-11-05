@@ -680,7 +680,7 @@ int ESP32_MQTTv5::sendPacket(const uint8_t *packet, int length) {
 }
 
 int ESP32_MQTTv5::readByte() {
-  if (!_client || !_client->connected())
+  if (!_client || (!_client->connected() && !_client->available()))
     return -1;
   int b = _client->read();
   if (b != -1)
@@ -689,7 +689,7 @@ int ESP32_MQTTv5::readByte() {
 }
 
 int ESP32_MQTTv5::readBytes(uint8_t *buf, int len) {
-  if (!_client || !_client->connected())
+  if (!_client || (!_client->connected() && !_client->available()))
     return 0;
 
   unsigned long deadline = millis() + _readTimeoutMs;
@@ -700,6 +700,8 @@ int ESP32_MQTTv5::readBytes(uint8_t *buf, int len) {
     if (_client->available()) {
       buf[got++] = (uint8_t)_client->read();
       deadline = millis() + _readTimeoutMs;
+    } else if (!_client->connected()) {
+      break;
     } else {
       delay(0);
     }
@@ -985,13 +987,17 @@ bool ESP32_MQTTv5::connect(const String &clientId, const String &username,
   unsigned long timeout = millis() + 5000;
   while (millis() < timeout) {
     if (!_client->available()) {
+      if (!_client->connected())
+        break;
       delay(10);
       continue;
     }
 
     int hdr = readByte();
-    if (hdr < 0)
+    if (hdr < 0) {
+      delay(1);
       continue;
+    }
     uint8_t ptype = (uint8_t)hdr & 0xF0;
 
     uint8_t lenBuf[4];
@@ -1041,6 +1047,7 @@ bool ESP32_MQTTv5::connect(const String &clientId, const String &username,
 
     uint8_t reasonCode = _buffer[1];
     _lastReasonCode = (MQTTReasonCode)reasonCode;
+    _lastReasonString = String();
 
     if (remLen > 2) {
       int pLen;
@@ -1048,7 +1055,8 @@ bool ESP32_MQTTv5::connect(const String &clientId, const String &username,
       if (pLen > 0) {
         MQTTProperties props;
         props.parse(&_buffer[2 + enc], pLen);
-        _lastReasonString = props.getReasonString();
+        String connAckReasonStr = props.getReasonString();
+        _lastReasonString = connAckReasonStr;
         _serverTopicAliasMaximum = props.getUint16(TOPIC_ALIAS_MAXIMUM, 0);
         _serverMaxPacketSize = props.getUint32(MAXIMUM_PACKET_SIZE, 0);
 
@@ -1067,14 +1075,18 @@ bool ESP32_MQTTv5::connect(const String &clientId, const String &username,
           }
         }
 
-        if (_serverTopicAliasMaximum > MQTT_MAX_ALIASES) {
+        if (_serverTopicAliasMaximum > MQTT_MAX_ALIASES && reasonCode == SUCCESS) {
           notifyError(UNSPECIFIED_ERROR, "Server TopicAliasMaximum (" +
                                              String(_serverTopicAliasMaximum) +
                                              ") > MQTT_MAX_ALIASES (" +
                                              String(MQTT_MAX_ALIASES) +
                                              "). Clamped.");
           _serverTopicAliasMaximum = MQTT_MAX_ALIASES;
+        } else if (_serverTopicAliasMaximum > MQTT_MAX_ALIASES) {
+          _serverTopicAliasMaximum = MQTT_MAX_ALIASES;
         }
+        _lastReasonCode = (MQTTReasonCode)reasonCode;
+        _lastReasonString = connAckReasonStr;
       }
     }
 
@@ -1086,14 +1098,17 @@ bool ESP32_MQTTv5::connect(const String &clientId, const String &username,
         _connectCallback();
       return true;
     } else {
-      char buf[40];
+      char buf[128];
       if (_lastReasonString.length())
-        snprintf(buf, sizeof(buf), "CONNACK 0x%02X: %.24s", reasonCode,
+        snprintf(buf, sizeof(buf), "CONNACK 0x%02X: %.96s", reasonCode,
                  _lastReasonString.c_str());
       else
         snprintf(buf, sizeof(buf), "CONNACK 0x%02X", reasonCode);
       disconnect();
-      notifyError(_lastReasonCode, String(buf));
+      String preservedReason = _lastReasonString;
+      notifyError((MQTTReasonCode)reasonCode, String(buf));
+      _lastReasonCode = (MQTTReasonCode)reasonCode;
+      _lastReasonString = preservedReason;
       return false;
     }
   }
@@ -1122,12 +1137,21 @@ bool ESP32_MQTTv5::connected() {
 void ESP32_MQTTv5::loop() {
   if (_state == STATE_CONNECTED) {
 
-    if (!_client || !_client->connected()) {
+    if (!_client || (!_client->connected() && !_client->available())) {
       _state = STATE_DISCONNECTED;
       if (_disconnectCallback)
         _disconnectCallback(UNSPECIFIED_ERROR);
     } else {
       parseIncoming();
+      if (_state != STATE_CONNECTED) {
+        return;
+      }
+      if (!_client->connected() && !_client->available()) {
+        _state = STATE_DISCONNECTED;
+        if (_disconnectCallback)
+          _disconnectCallback(UNSPECIFIED_ERROR);
+        return;
+      }
       retransmitQoS2();
 
       unsigned long now = millis();
@@ -1541,6 +1565,7 @@ bool ESP32_MQTTv5::parseIncoming() {
       MQTTReasonCode rc =
           (remLen >= 1) ? (MQTTReasonCode)_buffer[0] : NORMAL_DISCONNECTION;
       _lastReasonCode = rc;
+      _lastReasonString = String();
       if (remLen > 1) {
         int pLen;
         int enc = decodeLength(&_buffer[1], pLen);

@@ -133,6 +133,8 @@ void loop() {
 | `setSessionExpiry(seconds)` | Session expiry interval (0 = delete on disconnect) |
 | `setTopicAliasMaximum(max)` | Max outgoing topic aliases to negotiate (default 0) |
 | `setWill(topic, payload, qos, retain, props)` | Configure last will |
+| `hasWill()` | Returns `true` if a last will message is configured |
+| `setRawExclusiveTopic(topic)` | Deliver `topic` exclusively to `onMessageRaw` without allocating a `String` copy for `onMessage` |
 | `setAutoReconnect(enable, initDelay, maxDelay)` | Exponential backoff auto‑reconnect |
 | `setDynamicBufferResize(enable)` | Allow automatic buffer growth (default true) |
 | `setReadTimeout(ms)` | Timeout for reading packet length and payload (default 2000) |
@@ -169,9 +171,9 @@ void loop() {
 |----------|-------------|
 | `onConnect(cb)` | Called after successful CONNACK |
 | `onDisconnect(cb)` | Called on disconnect (reason code) |
-| `onMessage(cb)` | Called for each PUBLISH (payload copied to `String`) |
-| `onMessageRaw(cb)` | **Zero‑copy** callback – payload as `const uint8_t*` (takes precedence over `onMessage`) |
-| `onError(cb)` | Protocol errors, timeouts, buffer overflows |
+| `onMessage(cb)` | Called for each PUBLISH (payload copied to `String`, except for `setRawExclusiveTopic`) |
+| `onMessageRaw(cb)` | **Zero‑copy** callback – payload as `const uint8_t*` (coexists with `onMessage`) |
+| `onError(cb)` | Protocol errors, rejected `CONNACK` (`CONNACK 0xXX: <reason>`), timeouts, buffer overflows |
 | `onAuth(cb)` | Enhanced authentication challenge (AUTH packet) |
 
 #### Authentication
@@ -182,8 +184,9 @@ void loop() {
 #### Utility
 | Method | Description |
 |--------|-------------|
-| `lastReasonCode()` | Last reason code received |
-| `lastReasonString()` | Optional reason string from server |
+| `lastReasonCode()` | Last reason code received from `CONNACK` or `DISCONNECT` |
+| `lastReasonString()` | Reason string received from server `CONNACK` or `DISCONNECT` (preserved across disconnect cleanup) |
+| `lastInboundProperties()` | Parsed `MQTTProperties` from the most recent inbound `PUBLISH` packet |
 
 ---
 
@@ -322,6 +325,7 @@ You can override these defaults before including the library:
 | `MQTT_MAX_QOS2_OUT` | 8 | Max concurrent QoS 2 outgoing messages |
 | `MQTT_MAX_QOS2_IN` | 8 | Max concurrent QoS 2 incoming messages |
 | `MQTT_DEFAULT_BUFFER_SIZE` | 512 | Default buffer size (bytes) |
+| `MQTT_MAX_AUTO_BUFFER_SIZE` | 8192 | Upper bound (bytes) for automatic buffer growth from `CONNACK` `MAXIMUM_PACKET_SIZE` |
 | `MQTT_QOS2_RETRY_MS` | 5000 | Retry interval for QoS 2 messages (ms) |
 | `MQTT_QOS2_MAX_RETRIES` | 3 | Max retransmissions before abandoning |
 
@@ -337,7 +341,7 @@ Example:
 ##  Memory & Performance
 
 - **Static arrays only** – No `std::vector`, no `std::map`, no heap fragmentation.
-- **Single dynamic buffer** – Grows on demand (if enabled) and is reused.
+- **Dedicated RX & TX reusable buffers** – Separate inbound (`_buffer`) and outbound (`_txBuffer`) buffers grow safely on demand (bounded by `MQTT_MAX_AUTO_BUFFER_SIZE`) so reentrant publishes inside callbacks never corrupt incoming packets.
 - **Raw callback** – Avoids `String` copy for large payloads.
 - **Typical RAM usage** (default settings): ~2.5 KB + buffer (512 B).  
   With QoS 2 retransmission buffers, additional memory is allocated temporarily.
@@ -392,6 +396,12 @@ The backend provides a scalable architecture for managing multiple devices simul
 ---
 
 ## Changelog
+
+### v1.0.6
+- Drained buffered socket RX bytes (`_client->available()`) in `readByte()`, `readBytes()`, `connect()`, and `loop()` when the broker closes the TCP socket immediately after sending a rejected `CONNACK` or server-initiated `DISCONNECT` (e.g., `0x87 Not Authorized`), preventing premature `UNSPECIFIED_ERROR` disconnects before the control packet is parsed, and exiting `connect()` immediately if the peer closes the socket with no bytes pending.
+- Preserved the exact server `ReasonCode` and `ReasonString` (`lastReasonCode()` / `lastReasonString()`) across `CONNACK` and `DISCONNECT` handling: cleared stale reason strings between frames, prevented `TopicAliasMaximum` clamping or `disconnect()` cleanup from overwriting a rejected `CONNACK` reason, and expanded the `CONNACK` error formatting buffer from `40` to `128` bytes (`CONNACK 0x%02X: %.96s`) so full diagnostic or cryptographic reason payloads (such as `ACCOUNT_UNLINKED:<proof>`) reach `onError()` and `lastReasonString()` intact.
+- Added post-`parseIncoming()` state and socket checks in `loop()` to return cleanly without running QoS 2 retransmissions or `PINGREQ` keepalives after an inbound `DISCONNECT` or peer socket close.
+- Updated `ESP32_MQTTV5_VERSION` macro and `library.properties` version to `"1.0.6"`.
 
 ### v1.0.5
 - Added dedicated `_txBuffer` for `publish()`, `subscribe()`, and `unsubscribe()` so reentrant transmissions inside `onMessage` / `onConnect` callbacks never overwrite the inbound `_buffer`.

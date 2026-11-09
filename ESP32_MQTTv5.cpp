@@ -865,8 +865,9 @@ int ESP32_MQTTv5::buildConnect(uint8_t *buf, int bufSize,
   if (cpLen < 0)
     return -1;
 
-  int encCp = encodeLength(&buf[pos], (uint32_t)cpLen);
+  int encCp = encodeLength(nullptr, (uint32_t)cpLen);
   BC_NEED(encCp + cpLen);
+  encodeLength(&buf[pos], (uint32_t)cpLen);
   pos += encCp;
   if (cpLen > 0) {
     memcpy(&buf[pos], cpBuf, cpLen);
@@ -886,8 +887,9 @@ int ESP32_MQTTv5::buildConnect(uint8_t *buf, int bufSize,
     int wpLen = _willProps.serialize(wpBuf, sizeof(wpBuf));
     if (wpLen < 0)
       return -1;
-    int encWp = encodeLength(&buf[pos], (uint32_t)wpLen);
+    int encWp = encodeLength(nullptr, (uint32_t)wpLen);
     BC_NEED(encWp + wpLen);
+    encodeLength(&buf[pos], (uint32_t)wpLen);
     pos += encWp;
     if (wpLen > 0) {
       memcpy(&buf[pos], wpBuf, wpLen);
@@ -1025,9 +1027,9 @@ bool ESP32_MQTTv5::connect(const String &clientId, const String &username,
           (remLen >= 1) ? (MQTTReasonCode)_buffer[0] : SUCCESS;
       MQTTProperties authProps;
       if (remLen > 1) {
-        int pLen;
+        int pLen = 0;
         int enc = decodeLength(&_buffer[1], pLen);
-        if (pLen > 0)
+        if (enc > 0 && pLen > 0 && (1 + enc + pLen) <= remLen)
           authProps.parse(&_buffer[1 + enc], pLen);
       }
       if (_authCallback)
@@ -1050,8 +1052,13 @@ bool ESP32_MQTTv5::connect(const String &clientId, const String &username,
     _lastReasonString = String();
 
     if (remLen > 2) {
-      int pLen;
+      int pLen = 0;
       int enc = decodeLength(&_buffer[2], pLen);
+      if (enc <= 0 || pLen < 0 || (2 + enc + pLen) > remLen) {
+        disconnect();
+        notifyError(MALFORMED_PACKET, "CONNACK property length overflow");
+        return false;
+      }
       if (pLen > 0) {
         MQTTProperties props;
         props.parse(&_buffer[2 + enc], pLen);
@@ -1388,18 +1395,20 @@ bool ESP32_MQTTv5::parseIncoming() {
     }
 
     if ((int)remLen > _bufferSize) {
-      if (_allowDynamicBufferResize) {
+      if (_allowDynamicBufferResize && remLen <= (65535 - 512)) {
         int newSize = remLen + 512;
         if (newSize > 65535)
           newSize = 65535;
         _desiredBufferSize = (uint16_t)newSize;
-        if (!allocBuffer()) {
+        if (!allocBuffer() || (int)remLen > _bufferSize) {
           int drain = remLen;
           while (drain > 0) {
             uint8_t tmp[64];
             int rd = (drain < (int)sizeof(tmp)) ? drain : (int)sizeof(tmp);
-            readBytes(tmp, rd);
-            drain -= rd;
+            int got = readBytes(tmp, rd);
+            if (got <= 0)
+              break;
+            drain -= got;
           }
           notifyError(UNSPECIFIED_ERROR, "Dynamic buffer resize failed");
           return true;
@@ -1408,9 +1417,12 @@ bool ESP32_MQTTv5::parseIncoming() {
       } else {
         int drain = remLen;
         while (drain > 0) {
-          int chunk = (drain < _bufferSize) ? drain : _bufferSize;
-          readBytes(_buffer, chunk);
-          drain -= chunk;
+          uint8_t tmp[64];
+          int chunk = (drain < (int)sizeof(tmp)) ? drain : (int)sizeof(tmp);
+          int got = readBytes(tmp, chunk);
+          if (got <= 0)
+            break;
+          drain -= got;
         }
         notifyError(PACKET_TOO_LARGE, "Incoming packet exceeds buffer");
         return true;
@@ -1452,8 +1464,12 @@ bool ESP32_MQTTv5::parseIncoming() {
 
       if (pos >= remLen)
         break;
-      int propLen;
+      int propLen = 0;
       int encProp = decodeLength(&_buffer[pos], propLen);
+      if (encProp <= 0 || propLen < 0 || (pos + encProp + propLen) > remLen) {
+        notifyError(MALFORMED_PACKET, "PUBLISH property length overflow");
+        break;
+      }
       pos += encProp;
       MQTTProperties props;
       if (propLen > 0) {
@@ -1466,6 +1482,10 @@ bool ESP32_MQTTv5::parseIncoming() {
 
       bool isDup = (qos == 2) && isQoS2InFlight(packetId);
       int payloadLen = remLen - pos;
+      if (payloadLen < 0) {
+        notifyError(MALFORMED_PACKET, "PUBLISH payload length underflow");
+        break;
+      }
 
       if (qos == 1) {
         uint8_t ack[4] = {MQTT_PUBACK, 0x02, (uint8_t)(packetId >> 8),
@@ -1511,8 +1531,21 @@ bool ESP32_MQTTv5::parseIncoming() {
       break;
     }
 
-    case MQTT_PUBACK:
+    case MQTT_PUBACK: {
+      if (remLen < 2) {
+        notifyError(MALFORMED_PACKET, "Short PUBACK");
+        break;
+      }
+      if (remLen > 3) {
+        int pLen = 0;
+        int enc = decodeLength(&_buffer[3], pLen);
+        if (enc <= 0 || pLen < 0 || (3 + enc + pLen) > remLen) {
+          notifyError(MALFORMED_PACKET, "PUBACK property length overflow");
+          break;
+        }
+      }
       break;
+    }
 
     case MQTT_PUBREC: {
       if (remLen >= 2) {
@@ -1551,9 +1584,9 @@ bool ESP32_MQTTv5::parseIncoming() {
           (remLen >= 1) ? (MQTTReasonCode)_buffer[0] : SUCCESS;
       MQTTProperties authProps;
       if (remLen > 1) {
-        int pLen;
+        int pLen = 0;
         int enc = decodeLength(&_buffer[1], pLen);
-        if (pLen > 0)
+        if (enc > 0 && pLen > 0 && (1 + enc + pLen) <= remLen)
           authProps.parse(&_buffer[1 + enc], pLen);
       }
       if (_authCallback)
@@ -1567,9 +1600,9 @@ bool ESP32_MQTTv5::parseIncoming() {
       _lastReasonCode = rc;
       _lastReasonString = String();
       if (remLen > 1) {
-        int pLen;
+        int pLen = 0;
         int enc = decodeLength(&_buffer[1], pLen);
-        if (pLen > 0) {
+        if (enc > 0 && pLen > 0 && (1 + enc + pLen) <= remLen) {
           MQTTProperties dp;
           dp.parse(&_buffer[1 + enc], pLen);
           _lastReasonString = dp.getReasonString();
@@ -1691,8 +1724,9 @@ bool ESP32_MQTTv5::publish(const String &topic, const String &payload,
     body[bpos++] = packetId & 0xFF;
   }
 
-  int encProp = encodeLength(&body[bpos], (uint32_t)propLen);
+  int encProp = encodeLength(nullptr, (uint32_t)propLen);
   PB_NEED(encProp + propLen);
+  encodeLength(&body[bpos], (uint32_t)propLen);
   bpos += encProp;
   if (propLen > 0) {
     memcpy(&body[bpos], propBuf, propLen);

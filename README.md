@@ -341,7 +341,8 @@ Example:
 ##  Memory & Performance
 
 - **Static arrays only** – No `std::vector`, no `std::map`, no heap fragmentation.
-- **Dedicated RX & TX reusable buffers** – Separate inbound (`_buffer`) and outbound (`_txBuffer`) buffers grow safely on demand (bounded by `MQTT_MAX_AUTO_BUFFER_SIZE`) so reentrant publishes inside callbacks never corrupt incoming packets.
+- **Dedicated RX & TX reusable buffers** – Separate inbound (`_buffer`) and outbound (`_txBuffer`) buffers grow safely on demand (bounded by `MQTT_MAX_AUTO_BUFFER_SIZE` on `CONNACK` and capped at `65535 - 512` bytes on dynamic inbound resize) so reentrant publishes inside callbacks never corrupt incoming packets.
+- **Strict Packet & Property Bounds Validation** – Validates variable-byte integer headers and property lengths (`propLen` / `pLen`) against `remLen` across `PUBLISH`, `CONNACK`, `PUBACK`, `AUTH`, and `DISCONNECT` frames before parsing properties or computing payload length, and verifies remaining TX capacity before encoding variable-byte headers in `buildConnect()` and `publish()`.
 - **Raw callback** – Avoids `String` copy for large payloads.
 - **Typical RAM usage** (default settings): ~2.5 KB + buffer (512 B).  
   With QoS 2 retransmission buffers, additional memory is allocated temporarily.
@@ -396,6 +397,12 @@ The backend provides a scalable architecture for managing multiple devices simul
 ---
 
 ## Changelog
+
+### v1.0.7
+- Hardened dynamic receive buffer resizing in `parseIncoming()` (`_allowDynamicBufferResize`): requires `remLen <= (65535 - 512)` before growing the 16-bit `_desiredBufferSize` (`uint16_t`) and verifies `(int)remLen <= _bufferSize` after `allocBuffer()`, draining oversized frames in 64-byte chunks instead of overflowing `_buffer` (`CVE-2026-87121` class mitigation).
+- Enforced strict variable-header and MQTT 5.0 property-length bounds validation (`enc > 0 && propLen >= 0 && (offset + enc + propLen) <= remLen`) across `MQTT_PUBLISH`, `MQTT_CONNACK`, `MQTT_PUBACK`, `MQTT_AUTH`, and `MQTT_DISCONNECT` in `parseIncoming()` and `connect()`, and verified `payloadLen >= 0` before invoking `_messageRawCallback` or `_messageCallback` (`CVE-2018-19417` and `CVE-2026-114550` class mitigations).
+- Guarded `encodeLength(uint8_t *buf, uint32_t value)` when `buf == nullptr` and computed encoded variable-byte integer lengths before `BC_NEED` / `PB_NEED` bounds checks in `buildConnect()` and `publish()` so header bytes are never written prior to capacity verification.
+- Updated `ESP32_MQTTV5_VERSION` macro and `library.properties` version to `"1.0.7"`.
 
 ### v1.0.6
 - Drained buffered socket RX bytes (`_client->available()`) in `readByte()`, `readBytes()`, `connect()`, and `loop()` when the broker closes the TCP socket immediately after sending a rejected `CONNACK` or server-initiated `DISCONNECT` (e.g., `0x87 Not Authorized`), preventing premature `UNSPECIFIED_ERROR` disconnects before the control packet is parsed, and exiting `connect()` immediately if the peer closes the socket with no bytes pending.

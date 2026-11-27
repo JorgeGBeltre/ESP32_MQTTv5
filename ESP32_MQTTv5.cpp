@@ -731,15 +731,20 @@ int ESP32_MQTTv5::encodeLength(uint8_t *buf, uint32_t value) {
   return bytes;
 }
 
-int ESP32_MQTTv5::decodeLength(const uint8_t *buf, int &value) {
-  int bytes = 0, multiplier = 1;
+int ESP32_MQTTv5::decodeLength(const uint8_t *buf, int &value, int maxLen) {
   value = 0;
+  if (!buf || maxLen <= 0)
+    return -1;
+  int limit = maxLen < 4 ? maxLen : 4;
+  int bytes = 0, multiplier = 1;
   uint8_t digit;
   do {
+    if (bytes >= limit)
+      return -1;
     digit = buf[bytes++];
     value += (digit & 0x7F) * multiplier;
     multiplier *= 128;
-  } while ((digit & 0x80) && bytes < 4);
+  } while (digit & 0x80);
   return bytes;
 }
 
@@ -1004,14 +1009,28 @@ bool ESP32_MQTTv5::connect(const String &clientId, const String &username,
 
     uint8_t lenBuf[4];
     int lenBytes = 0;
-    do {
+    bool lenComplete = false;
+    while (lenBytes < 4) {
       int b = readByte();
       if (b < 0)
         break;
-      lenBuf[lenBytes] = (uint8_t)b;
-    } while ((lenBuf[lenBytes++] & 0x80) && lenBytes < 4);
-    int remLen;
-    decodeLength(lenBuf, remLen);
+      lenBuf[lenBytes++] = (uint8_t)b;
+      if ((b & 0x80) == 0) {
+        lenComplete = true;
+        break;
+      }
+    }
+    if (!lenComplete) {
+      disconnect();
+      notifyError(MALFORMED_PACKET, "Malformed or truncated remaining length");
+      return false;
+    }
+    int remLen = 0;
+    if (decodeLength(lenBuf, remLen, lenBytes) <= 0) {
+      disconnect();
+      notifyError(MALFORMED_PACKET, "Invalid remaining length");
+      return false;
+    }
 
     if (remLen < 0 || remLen > _bufferSize) {
 
@@ -1028,7 +1047,7 @@ bool ESP32_MQTTv5::connect(const String &clientId, const String &username,
       MQTTProperties authProps;
       if (remLen > 1) {
         int pLen = 0;
-        int enc = decodeLength(&_buffer[1], pLen);
+        int enc = decodeLength(&_buffer[1], pLen, remLen - 1);
         if (enc > 0 && pLen > 0 && (1 + enc + pLen) <= remLen)
           authProps.parse(&_buffer[1 + enc], pLen);
       }
@@ -1047,13 +1066,18 @@ bool ESP32_MQTTv5::connect(const String &clientId, const String &username,
       return false;
     }
 
+    uint8_t sessionPresent = _buffer[0] & 0x01;
     uint8_t reasonCode = _buffer[1];
     _lastReasonCode = (MQTTReasonCode)reasonCode;
     _lastReasonString = String();
 
+    if (reasonCode == SUCCESS && (_cleanStart || sessionPresent == 0)) {
+      resetSession();
+    }
+
     if (remLen > 2) {
       int pLen = 0;
-      int enc = decodeLength(&_buffer[2], pLen);
+      int enc = decodeLength(&_buffer[2], pLen, remLen - 2);
       if (enc <= 0 || pLen < 0 || (2 + enc + pLen) > remLen) {
         disconnect();
         notifyError(MALFORMED_PACKET, "CONNACK property length overflow");
@@ -1100,7 +1124,6 @@ bool ESP32_MQTTv5::connect(const String &clientId, const String &username,
     if (reasonCode == SUCCESS) {
       _state = STATE_CONNECTED;
       _lastInbound = _lastOutbound = millis();
-      resetSession();
       if (_connectCallback)
         _connectCallback();
       return true;
@@ -1465,7 +1488,7 @@ bool ESP32_MQTTv5::parseIncoming() {
       if (pos >= remLen)
         break;
       int propLen = 0;
-      int encProp = decodeLength(&_buffer[pos], propLen);
+      int encProp = decodeLength(&_buffer[pos], propLen, remLen - pos);
       if (encProp <= 0 || propLen < 0 || (pos + encProp + propLen) > remLen) {
         notifyError(MALFORMED_PACKET, "PUBLISH property length overflow");
         break;
@@ -1538,7 +1561,7 @@ bool ESP32_MQTTv5::parseIncoming() {
       }
       if (remLen > 3) {
         int pLen = 0;
-        int enc = decodeLength(&_buffer[3], pLen);
+        int enc = decodeLength(&_buffer[3], pLen, remLen - 3);
         if (enc <= 0 || pLen < 0 || (3 + enc + pLen) > remLen) {
           notifyError(MALFORMED_PACKET, "PUBACK property length overflow");
           break;
@@ -1585,7 +1608,7 @@ bool ESP32_MQTTv5::parseIncoming() {
       MQTTProperties authProps;
       if (remLen > 1) {
         int pLen = 0;
-        int enc = decodeLength(&_buffer[1], pLen);
+        int enc = decodeLength(&_buffer[1], pLen, remLen - 1);
         if (enc > 0 && pLen > 0 && (1 + enc + pLen) <= remLen)
           authProps.parse(&_buffer[1 + enc], pLen);
       }
@@ -1601,7 +1624,7 @@ bool ESP32_MQTTv5::parseIncoming() {
       _lastReasonString = String();
       if (remLen > 1) {
         int pLen = 0;
-        int enc = decodeLength(&_buffer[1], pLen);
+        int enc = decodeLength(&_buffer[1], pLen, remLen - 1);
         if (enc > 0 && pLen > 0 && (1 + enc + pLen) <= remLen) {
           MQTTProperties dp;
           dp.parse(&_buffer[1 + enc], pLen);

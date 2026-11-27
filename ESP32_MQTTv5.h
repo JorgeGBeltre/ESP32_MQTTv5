@@ -1,6 +1,6 @@
 #ifndef ESP32_MQTTV5_H
 #define ESP32_MQTTV5_H
-#define ESP32_MQTTV5_VERSION "1.0.7"
+#define ESP32_MQTTV5_VERSION "1.0.8"
 
 #include <WiFi.h>
 #include <functional>
@@ -412,7 +412,7 @@ private:
   int readBytes(uint8_t *buf, int len);
   uint16_t getNextPacketId();
   int encodeLength(uint8_t *buf, uint32_t value);
-  int decodeLength(const uint8_t *buf, int &value);
+  int decodeLength(const uint8_t *buf, int &value, int maxLen = 4);
 
   bool allocBuffer();
   void freeBuffer();

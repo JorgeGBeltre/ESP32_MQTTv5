@@ -398,6 +398,10 @@ The backend provides a scalable architecture for managing multiple devices simul
 
 ## Changelog
 
+### v1.0.8
+- Bounded `decodeLength(const uint8_t *buf, uint32_t &value, int maxLen)` against caller buffer bounds (`i >= maxLen` returns `-1`), verified complete `CONNACK` remaining-length continuation reads before decoding in `connect()`, and moved `resetSession()` ahead of `CONNACK` property parsing so broker-negotiated `_serverMaxPacketSize` and `_serverTopicAliasMaximum` limits are preserved on clean-start connections.
+- Added PlatformIO `library.json` manifest and synchronized `ESP32_MQTTV5_VERSION` (`ESP32_MQTTv5.h`) and `library.properties` to `"1.0.8"`.
+
 ### v1.0.7
 - Hardened dynamic receive buffer resizing in `parseIncoming()` (`_allowDynamicBufferResize`): requires `remLen <= (65535 - 512)` before growing the 16-bit `_desiredBufferSize` (`uint16_t`) and verifies `(int)remLen <= _bufferSize` after `allocBuffer()`, draining oversized frames in 64-byte chunks instead of overflowing `_buffer` (`CVE-2026-87121` class mitigation).
 - Enforced strict variable-header and MQTT 5.0 property-length bounds validation (`enc > 0 && propLen >= 0 && (offset + enc + propLen) <= remLen`) across `MQTT_PUBLISH`, `MQTT_CONNACK`, `MQTT_PUBACK`, `MQTT_AUTH`, and `MQTT_DISCONNECT` in `parseIncoming()` and `connect()`, and verified `payloadLen >= 0` before invoking `_messageRawCallback` or `_messageCallback` (`CVE-2018-19417` and `CVE-2026-114550` class mitigations).
